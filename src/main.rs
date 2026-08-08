@@ -177,6 +177,16 @@ enum Transport {
     Http3,
 }
 
+impl Transport {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Transport::Ws => "ws",
+            Transport::Http => "http",
+            Transport::Http3 => "http3",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct Endpoint {
     url: String,
@@ -1920,10 +1930,11 @@ fn push_metric(
     out.push_str(name);
     out.push('{');
     out.push_str(&format!(
-        "wss=\"{}\",network=\"{}\",zone=\"{}\"",
+        "wss=\"{}\",network=\"{}\",zone=\"{}\",transport=\"{}\"",
         escape_label(&endpoint.url),
         escape_label(&endpoint.network),
-        escape_label(zone)
+        escape_label(zone),
+        endpoint.transport.as_str()
     ));
     for (key, label_value) in extra_labels {
         out.push_str(&format!(",{}=\"{}\"", key, escape_label(label_value)));
@@ -2079,18 +2090,21 @@ d"#
                     url: "wss://z.example".to_owned(),
                     network: "polkadot".to_owned(),
                     zone: "us-east".to_owned(),
+                    transport: Transport::Ws,
                     provider: None,
                 },
                 Endpoint {
                     url: "wss://b.example".to_owned(),
                     network: "kusama".to_owned(),
                     zone: "eu-central".to_owned(),
+                    transport: Transport::Ws,
                     provider: None,
                 },
                 Endpoint {
                     url: "wss://a.example".to_owned(),
                     network: "polkadot".to_owned(),
                     zone: "eu-central".to_owned(),
+                    transport: Transport::Ws,
                     provider: None,
                 },
             ],
@@ -2161,6 +2175,7 @@ d"#
                     url: "wss://a.example".to_owned(),
                     network: "polkadot".to_owned(),
                     zone: "eu-central".to_owned(),
+                    transport: Transport::Ws,
                     provider: None,
                 },
                 block_zero_secs: None,
@@ -2176,6 +2191,7 @@ d"#
                     url: "wss://b.example".to_owned(),
                     network: "polkadot".to_owned(),
                     zone: "eu-central".to_owned(),
+                    transport: Transport::Ws,
                     provider: None,
                 },
                 block_zero_secs: None,
@@ -2191,6 +2207,7 @@ d"#
                     url: "wss://c.example".to_owned(),
                     network: "kusama".to_owned(),
                     zone: "eu-central".to_owned(),
+                    transport: Transport::Ws,
                     provider: None,
                 },
                 block_zero_secs: None,
@@ -2214,6 +2231,7 @@ d"#
             url: "wss://example.invalid".to_owned(),
             network: "polkadot-bulletin".to_owned(),
             zone: "eu-central".to_owned(),
+            transport: Transport::Ws,
             provider: None,
         };
         let result = check_endpoint(
@@ -2240,6 +2258,7 @@ d"#
                 url: "wss://bulletin.example".to_owned(),
                 network: "polkadot-bulletin".to_owned(),
                 zone: "us-east".to_owned(),
+                transport: Transport::Ws,
                 provider: None,
             },
             block_zero_secs: None,
@@ -2253,7 +2272,7 @@ d"#
 
         let metrics = render_prometheus("us-east", 123, 1.0, &[result]);
         assert!(metrics.contains(
-            "rpc_error{wss=\"wss://bulletin.example\",network=\"polkadot-bulletin\",zone=\"us-east\",error=\"blockzero\"} 0.000000 123"
+            "rpc_error{wss=\"wss://bulletin.example\",network=\"polkadot-bulletin\",zone=\"us-east\",transport=\"ws\",error=\"blockzero\"} 0.000000 123"
         ));
     }
 
