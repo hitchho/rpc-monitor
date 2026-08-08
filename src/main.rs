@@ -1476,22 +1476,49 @@ async fn rpc_call_over(
 }
 
 /// Build a reqwest client for the given HTTP transport.
-fn http_client(transport: Transport) -> Result<reqwest::Client> {
-    let builder = reqwest::Client::builder();
-    let builder = match transport {
-        // Force QUIC/HTTP/3 (no Alt-Svc negotiation / fallback) for explicit
-        // http3 endpoints. Requires a QUIC-capable server.
-        Transport::Http3 => builder.http3_prior_knowledge(),
-        // Default HTTP/2 + HTTP/1.1 over TLS.
-        _ => builder,
-    };
-    builder
+/// HTTP client pair for browser-style optimistic HTTP/3:
+/// - `h3`: QUIC/HTTP/3 client (http3_prior_knowledge) used first.
+/// - `h2`: regular HTTP/2+HTTP/1.1 client, used as fallback.
+/// `optimistic` controls whether an HTTP/3 failure falls back to h2 (true) or
+/// is reported as an error (false — explicit `http3` transport).
+struct HttpClient {
+    h3: Option<reqwest::Client>,
+    h2: reqwest::Client,
+    optimistic: bool,
+}
+
+fn http_client(transport: Transport) -> Result<HttpClient> {
+    let h2 = reqwest::Client::builder()
         .build()
-        .with_context(|| format!("failed to build HTTP client for {transport:?}"))
+        .with_context(|| format!("failed to build HTTP/2 client for {transport:?}"))?;
+    let (h3, optimistic) = match transport {
+        // HTTP/3-optimistic, like a browser: try QUIC first, fall back to h2/h1.
+        Transport::Http => (
+            Some(
+                reqwest::Client::builder()
+                    .http3_prior_knowledge()
+                    .build()
+                    .with_context(|| "failed to build HTTP/3 client".to_string())?,
+            ),
+            true,
+        ),
+        // Force HTTP/3 only (no fallback) — for explicit http3 endpoints.
+        Transport::Http3 => (
+            Some(
+                reqwest::Client::builder()
+                    .http3_prior_knowledge()
+                    .build()
+                    .with_context(|| "failed to build HTTP/3 client".to_string())?,
+            ),
+            false,
+        ),
+        Transport::Ws => (None, false),
+    };
+    Ok(HttpClient { h3, h2, optimistic })
 }
 
 async fn timed_rpc_http(
-    client: &reqwest::Client,
+    client: &HttpClient,
     url: &str,
     method: &str,
     params: Value,
@@ -1506,7 +1533,7 @@ async fn timed_rpc_http(
 }
 
 async fn rpc_call_http(
-    client: &reqwest::Client,
+    client: &HttpClient,
     url: &str,
     method: &str,
     params: Value,
@@ -1518,12 +1545,39 @@ async fn rpc_call_http(
         "method": method,
         "params": params,
     });
-    let response = client
-        .post(url)
-        .json(&request)
-        .send()
-        .await
-        .with_context(|| format!("failed to send {method} http request to {url}"))?;
+
+    // Try to send on the HTTP/3 (QUIC) client first, then fall back to h2/h1
+    // when optimistic (browser-like). For the forced http3 transport, an h3
+    // failure is a hard error.
+    let response = match &client.h3 {
+        Some(h3) => match h3.post(url).json(&request).send().await {
+            Ok(resp) => resp,
+            Err(h3_err) => {
+                if client.optimistic {
+                    client
+                        .h2
+                        .post(url)
+                        .json(&request)
+                        .send()
+                        .await
+                        .with_context(|| {
+                            format!("failed to send {method} http request to {url} (h3 then h2 fallback failed: {h3_err})")
+                        })?
+                } else {
+                    return Err(h3_err).with_context(|| {
+                        format!("failed to send {method} http3 request to {url}")
+                    });
+                }
+            }
+        },
+        None => client
+            .h2
+            .post(url)
+            .json(&request)
+            .send()
+            .await
+            .with_context(|| format!("failed to send {method} http request to {url}"))?,
+    };
     let status = response.status();
     if !status.is_success() {
         bail!("{method} http request to {url} returned status {status}");
